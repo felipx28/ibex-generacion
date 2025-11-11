@@ -129,6 +129,33 @@ int main(int argc, char** argv) {
 			cout << "  file loaded:\t\t" << filename.Get() << endl;
 		}
 
+
+
+		/**************************** 
+		 ** INICIO MOODIFICACIONES **
+		 ****************************/
+
+		std::ofstream InputFile("/home/felipe/Documents/magister/model2/input/prueba_nuevo_dataset/input_demostracion_cris.txt", std::ios::app);
+		string filename_with_route = filename.Get();
+		string filename_without_route = filename_with_route.substr(filename_with_route.find_last_of("/")+1);
+		
+		InputFile << filename_without_route << endl;
+		InputFile << "***********************************************************************************************************************" << endl;
+
+		InputFile.close();
+
+		std::ofstream OutputFile("/home/felipe/Documents/magister/model2/output/prueba_nuevo_dataset/output_demostracion_cris.txt", std::ios::app);
+		OutputFile << filename_without_route << endl;
+		OutputFile << "***********************************************************************************************************************" << endl;
+
+		OutputFile.close();
+		
+		/****************************
+		 ** FIN MOODIFICACIONES **
+		 ****************************/
+
+
+
 		if (rel_eps_f) {
 			config.set_rel_eps_f(rel_eps_f.Get());
 
@@ -318,11 +345,11 @@ int main(int argc, char** argv) {
 
 		o.get_data().save(output_cov_file.c_str());
 
-		if (!quiet) {
-			cout << " results written in " << output_cov_file << "\n";
-			if (overwitten)
-				cout << " (old file saved in " << cov_copy << ")\n";
-		}
+		// if (!quiet) {
+		// 	cout << " results written in " << output_cov_file << "\n";
+		// 	if (overwitten)
+		// 		cout << " (old file saved in " << cov_copy << ")\n";
+		// }
 
 		delete sys;
 

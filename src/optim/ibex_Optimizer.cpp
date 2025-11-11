@@ -13,8 +13,18 @@
 #include "ibex_NoBisectableVariableException.h"
 #include "ibex_BxpOptimData.h"
 #include "ibex_CovOptimData.h"
+#include <stdlib.h>
+#include "ibex_CellBeamSearch.h"
+#include "ibex_LoupFinderDefault.h"
+
+#include "ibex_SmearFunction.h"
+#include "ibex_ExtendedSystem.h"
+#include "ibex_OptimLargestFirst.h"
+#include "ibex_System.h"
 
 #include <float.h>
+#include <vector>
+#include <queue>
 #include <stdlib.h>
 #include <iomanip>
 
@@ -318,10 +328,35 @@ Optimizer::Status Optimizer::optimize(const char* cov_file, double obj_init_boun
 
 void Optimizer::start(const IntervalVector& init_box, double obj_init_bound) {
 
-	loup=obj_init_bound;
+	loup=obj_init_bound; // loup => lower upperbound, uplo => upper lowerbound
 
+
+	/***************************
+	 ** INICIO MODIFICACIONES **
+	 ***************************/
+
+	// double search_space = 1;
+	// double bigger_diam = NEG_INFINITY;
+	// double lower_diam = POS_INFINITY;
+	
+	IntervalVector aux(init_box.size());  //crea una variable auxiliar del tamaño de la cantidad de variables
+
+	for (int i = 0; i < init_box.size(); i++) {
+		aux[i] = init_box[i]; //asigna el valor de init_box a la variable auxiliar
+
+		//+10% 
+		//aux[i] = Interval((aux[i].lb() - aux[i].diam()/20), (aux[i].ub() + aux[i].diam()/20)); // esta aumenta un 10%
+
+		//+25% 
+		//aux[i] = Interval((aux[i].lb() - aux[i].diam()/8), (aux[i].ub() + aux[i].diam()/8)); // esta aumenta un 25%
+
+		//+50% 
+		//aux[i] = Interval((aux[i].lb() - aux[i].diam()/4), (aux[i].ub() + aux[i].diam()/4)); // esta aumenta un 50%
+	}
+	
 	// Just to initialize the "loup" for the buffer
 	// TODO: replace with a set_loup function
+	
 	buffer.contract(loup);
 
 	uplo=NEG_INFINITY;
@@ -333,26 +368,26 @@ void Optimizer::start(const IntervalVector& init_box, double obj_init_bound) {
 
 	Cell* root=new Cell(IntervalVector(n+1));
 
-	write_ext_box(init_box, root->box);
+	write_ext_box(aux, root->box);
 
 	// add data required by the bisector
-	bsc.add_property(init_box, root->prop);
+	bsc.add_property(aux, root->prop);
 
 	// add data required by the contractor
-	ctc.add_property(init_box, root->prop);
+	ctc.add_property(aux, root->prop);
 
 	// add data required by the buffer
-	buffer.add_property(init_box, root->prop);
+	buffer.add_property(aux, root->prop);
 
 	// add data required by the loup finder
-	loup_finder.add_property(init_box, root->prop);
+	loup_finder.add_property(aux, root->prop);
 
 	//cout << "**** Properties ****\n" << root->prop << endl;
 
 	loup_changed=false;
 	initial_loup=obj_init_bound;
 
-	loup_point = init_box; //.set_empty();
+	loup_point = aux; //.set_empty();
 	time=0;
 
 	if (cov) delete cov;
@@ -421,6 +456,152 @@ void Optimizer::start(const CovOptimData& data, double obj_init_bound) {
 	cov->data->_optim_nb_cells = data.nb_cells();
 }
 
+/**
+ * CALCULO DE LA FEATURE GAP REL LOUP
+ * EL FEATURE ES MÁS ROBUSTO QUE EL ANTERIOR, POR LO QUE DEBIESE FUNCIONAR MEJOR
+ * \brief Calculate a more robust relative gap feature based on the loup.
+ */
+
+// double calculate_improved_gap_rel_loup(double current_loup, double lb_f_obj, double ub_f_obj) {
+//     double epsilon = 1e-12; // Valor más pequeño para mayor precisión
+//     double gap_rel_loup;
+    
+//     if (!std::isfinite(current_loup) || current_loup == POS_INFINITY) {
+//         // Caso 1: No hay loup válido
+//         // El gap representa la incertidumbre relativa de la caja actual
+//         double numerator = ub_f_obj - lb_f_obj;
+//         double denominator = std::max(fabs(ub_f_obj), fabs(lb_f_obj));
+        
+//         if (denominator < epsilon) {
+//             gap_rel_loup = 1.0; // Máxima incertidumbre cuando ambos límites son ~0
+//         } else {
+//             gap_rel_loup = numerator / (denominator + epsilon);
+//         }
+        
+//         // Normalizar a [0,1] - mayor valor = menos prometedora
+//         gap_rel_loup = std::min(1.0, std::max(0.0, gap_rel_loup));
+        
+//     } else {
+//         // Caso 2: Hay loup válido
+//         // Calculamos qué tan cerca está el lower bound de la mejor solución conocida
+//         double numerator = current_loup - lb_f_obj;
+        
+//         // Si lb_f_obj > current_loup, la caja es muy prometedora (gap negativo)
+//         if (numerator < 0) {
+//             gap_rel_loup = 0.0; // Muy prometedora
+//         } else {
+//             // Normalizamos por la magnitud del loup
+//             double denominator = fabs(current_loup) + epsilon;
+//             gap_rel_loup = numerator / denominator;
+            
+//             // Limitamos a [0,1] para evitar valores extremos
+//             gap_rel_loup = std::min(1.0, gap_rel_loup);
+//         }
+//     }
+    
+//     return gap_rel_loup;
+// }
+
+/**
+ * Feature adicional: qué tan prometedora es la caja comparada con otras en el buffer
+ * Esta feature es de prueba por ahora, solo para ver como funciona
+ */
+// double calculate_relative_promise(double lb_f_obj, double buffer_minimum) {
+//     double epsilon = 1e-12;
+    
+//     if (!std::isfinite(buffer_minimum)) {
+//         return 0.5; // Valor neutro si no hay referencia
+//     }
+    
+//     double diff = lb_f_obj - buffer_minimum;
+    
+//     if (fabs(diff) < epsilon) {
+//         return 1.0; // Es la más prometedora del buffer
+//     }
+    
+//     // Normalizamos: valores más cercanos a buffer_minimum son más prometedores
+//     double scale = std::max(fabs(buffer_minimum), 1.0);
+//     return std::exp(-fabs(diff) / scale); // Decay exponencial
+// }
+
+double calculate_bounds_ratios(double lb, double ub, double epsilon, int id) {
+    static double initial_lb, initial_ub, initial_obj_range;
+    static bool initial_bounds_set = false;
+    
+    // Si es la primera llamada (id == 1), guardar valores iniciales
+    if (id == 1) {
+        initial_lb = lb;
+        initial_ub = ub;
+        initial_obj_range = initial_ub - initial_lb;
+        initial_bounds_set = true;
+    }
+    
+    // Verificar que se hayan establecido los valores iniciales
+    if (!initial_bounds_set) {
+        return -5.0; // Error: no se han establecido valores iniciales
+    }
+    
+    // Calcular rango actual
+    double current_obj_range = ub - lb;
+    
+    // Edge cases para bounds iniciales
+    bool initial_bounds_infinite = (!std::isfinite(initial_lb) || !std::isfinite(initial_ub));
+    bool initial_bounds_invalid = (!std::isfinite(initial_obj_range) || std::abs(initial_obj_range) < epsilon);
+    
+    // Edge cases para bounds actuales
+    bool current_bounds_invalid = (!std::isfinite(current_obj_range) || std::abs(current_obj_range) < epsilon);
+    
+    // Caso 1: Current bounds inválidos
+    if (current_bounds_invalid) {
+        return -5.0; // Valor sentinel
+    }
+    
+    // Caso 2: Bounds iniciales problemáticos - usar solo rango actual
+    if (initial_bounds_infinite || initial_bounds_invalid) {
+        double log_current_range = std::log10(current_obj_range);
+        return std::max(-5.0, std::min(5.0, log_current_range));
+    }
+    
+    // Caso 3: Normal - calcular progreso relativo
+    double progress_ratio = current_obj_range / initial_obj_range;
+    return std::max(0.0, std::min(1.0, progress_ratio));
+}
+
+double calculate_diameter_shape(double bigger_diam, double lower_diam, double epsilon) {
+    // Edge cases
+    if (lower_diam < epsilon || !std::isfinite(lower_diam)) return 0.0;
+    if (bigger_diam < epsilon || !std::isfinite(bigger_diam)) return 0.0;
+    
+    double diam_ratio = bigger_diam / lower_diam;
+    if (diam_ratio <= 1.0 + epsilon) return 0.0; // Box cuadrado
+    
+    double log_diam_ratio = std::log10(diam_ratio);
+    return std::max(-3.0, std::min(3.0, log_diam_ratio));
+}
+
+double calculate_diameter_progress(double current_diam, double epsilon, int id, bool is_bigger_diam) {
+    static double initial_bigger_diam, initial_lower_diam;
+    static bool initial_set = false;
+    
+    if (id == 1) {
+        if (is_bigger_diam) {
+            initial_bigger_diam = current_diam;
+        } else {
+            initial_lower_diam = current_diam;
+        }
+        initial_set = true;
+        return 1.0; // Valor inicial
+    }
+   
+    if (!initial_set) return 0.5;
+    
+    double initial_value = is_bigger_diam ? initial_bigger_diam : initial_lower_diam;
+    if (initial_value < epsilon) return 0.5;
+    
+    double progress = current_diam / initial_value;
+    return std::max(0.0, std::min(1.0, progress));
+} 
+
 Optimizer::Status Optimizer::optimize() {
 	Timer timer;
 	timer.start();
@@ -428,65 +609,356 @@ Optimizer::Status Optimizer::optimize() {
 	update_uplo();
 
 	try {
-	     while (!buffer.empty()) {
 
-			loup_changed=false;
-			// for double heap , choose randomly the buffer : top  has to be called before pop
-			Cell *c = buffer.top();
-			if (trace >= 2) cout << " current box " << c->box << endl;
+		/*****************************************
+		 ** DECLARACIÓN DE BUFFER Y LOUP FINDER **
+		 *****************************************/
 
-			try {
+		/**
+		 * \note dynamic_cast convierte de manera "forzosa" el puntero de la clase base a un puntero de la clase derivada.
+		 */ 
 
-				pair<Cell*,Cell*> new_cells=bsc.bisect(*c);
-				buffer.pop();
-				delete c; // deletes the cell.
+		CellBeamSearch * thebuffer = dynamic_cast<CellBeamSearch*>(&buffer);
+		LoupFinderDefault * lfd = dynamic_cast<LoupFinderDefault*>(&loup_finder);
 
-				nb_cells+=2;  // counting the cells handled ( in previous versions nb_cells was the number of cells put into the buffer after being handled)
+		//vector of cells
+		queue<Cell*> aux; 
 
-				handle_cell(*new_cells.first);
-				handle_cell(*new_cells.second);
+		//variable auxiliar para guardar el valor de la caja "inicial"
+		IntervalVector aux_box = thebuffer->top()->box;
+		double prec = 1e-7;
 
-				if (uplo_of_epsboxes == NEG_INFINITY) {
-					break;
-				}
-				if (loup_changed) {
-					// In case of a new upper bound (loup_changed == true), all the boxes
-					// with a lower bound greater than (loup - goal_prec) are removed and deleted.
-					// Note: if contraction was before bisection, we could have the problem
-					// that the current cell is removed by contractHeap. See comments in
-					// older version of the code (before revision 284).
+		/***********************************
+		 ** DECLARACIÓN DE LOS BISECTORES **
+		 ***********************************/
+		OptimLargestFirst bisector_olf(goal_var, true, prec, 0.5);
+		RoundRobin bisector_rr(prec, 0.5);
 
-					double ymax=compute_ymax();
+		// obtención del sistema para bisectores smear
+		System system = lfd->finder_x_taylor.sys;
+		SmearMax bisector_sm(system,prec);
+		SmearSum bisector_ss(system,prec);
+		SmearSumRelative bisector_ssr(system,prec);
+		
+		// upper lowerbound
+		double aux_uplo = uplo;
+		// lower upperbound
+		double aux_loup = loup;
+		// región interior donde se saca el uplo y loup
+		IntervalVector inner=aux_box;
+		
+		//		while(!buffer.empty())
+		// simulaciones son la cantidad de datos que se generarán
+		int num_sim = 1000;
+		double epsilon = 1e-9;
 
-					buffer.contract(ymax);
+		// se ingresa al vector la caja inicial del buffer (primer nodo a tratar)
+		aux.push(thebuffer->top());
+		
+		// se obtiene la celda actual para el análisis
+		// aqui calculamos los bounds iniciales para posteriormente calcular una proporción
+		double lb_f_obj_inicial = lfd->finder_x_taylor.sys.goal->eval(aux.front()->box).lb();
+		double ub_f_obj_inicial = lfd->finder_x_taylor.sys.goal->eval(aux.front()->box).ub();
+		double bigger_diam_inicial = aux.front()->box.max_diam();
+		double lower_diam_inicial = aux.front()->box.min_diam();		
 
-					//cout << " now buffer is contracted and min=" << buffer.minimum() << endl;
+		std::cout << "lb_f_obj_inicial: " << lb_f_obj_inicial << std::endl;
+		std::cout << "ub_f_obj_inicial: " << ub_f_obj_inicial << std::endl;
+		std::cout << "bigger_diam_inicial: " << bigger_diam_inicial << std::endl;
+		std::cout << "lower_diam_inicial: " << lower_diam_inicial << std::endl;
+		// estas variables son las que utilizaremos para calcular los límites dentro de las simulaciones.
+		double lb_f_obj;
+		double ub_f_obj;
+		double bigger_diam;
+		double lower_diam;
+		
+		// Variables finales que se utilizarán como input en la red neuronal
+		int variables = n;
+		BitSet active;
+		double ratio_bounds;
+		double ratio_bigger_diam;
+		double ratio_lower_diam;
+		double box_shape;
+		
+		std::ofstream InputFile("/home/felipe/Documents/magister/model2/input/prueba_nuevo_dataset/input_demostracion_cris.txt", std::ios::app);
+		std::ofstream OutputFile("/home/felipe/Documents/magister/model2/output/prueba_nuevo_dataset/output_demostracion_cris.txt", std::ios::app);
 
-					// TODO: check if happens. What is the return code in this case?
-					if (ymax <= NEG_INFINITY) {
-						if (trace) cout << " infinite value for the minimum " << endl;
-						break;
-					}
-				}
-				update_uplo();
-
-				if (!anticipated_upper_bounding) // useless to check precision on objective if 'true'
-					if (get_obj_rel_prec()<rel_eps_f || get_obj_abs_prec()<abs_eps_f)
-						break;
-
-				if (timeout>0) timer.check(timeout); // TODO: not reentrant, JN: done
-				time = timer.get_time();
-
-			}
-			catch (NoBisectableVariableException& ) {
-				update_uplo_of_epsboxes((c->box)[goal_var].lb());
-				buffer.pop();
-				delete c; // deletes the cell.
-				update_uplo(); // the heap has changed -> recalculate the uplo (eg: if not in best-first search)
-
-			}
+		if (!InputFile.is_open()) {
+			cerr << "No se pudo abrir el archivo. Comprueba la ruta y permisos." << endl;
+			exit(1);
 		}
 
+		if (!OutputFile.is_open()) {
+			cerr << "No se pudo abrir el archivo. Comprueba la ruta y permisos." << endl;
+			exit(1);
+		}
+
+		// se ingresa la cantidad de simulaciones que se realizarán
+		for (int k = 0 ; k < num_sim ; k++){
+
+			// si el tamaño del vector es 0, se sale del ciclo
+			if(aux.size() == 0) break;
+
+			lb_f_obj = lfd->finder_x_taylor.sys.goal->eval(aux.front()->box).lb();
+			ub_f_obj = lfd->finder_x_taylor.sys.goal->eval(aux.front()->box).ub();
+			bigger_diam = aux.front()->box.max_diam();
+			lower_diam = aux.front()->box.min_diam();
+			active = lfd->finder_x_taylor.sys.active_ctrs(aux.front()->box);
+			
+			// calculamos los ratios de las 4 variables numéricas
+			ratio_bounds = calculate_bounds_ratios(lb_f_obj, ub_f_obj, epsilon, k+1);
+			ratio_bigger_diam = calculate_diameter_progress(bigger_diam, epsilon, k+1, true); // true porque es bigger_diam
+			ratio_lower_diam = calculate_diameter_progress(lower_diam, epsilon, k+1, false); // false porque es lower_diam
+			box_shape = calculate_diameter_shape(bigger_diam, lower_diam, epsilon);
+
+			InputFile << "variables: " << variables << endl;
+			InputFile << "restricciones: " << active.size() << endl;
+			InputFile << "ratio_bounds: " << ratio_bounds << endl;
+			InputFile << "ratio_bigger_diam: " << ratio_bigger_diam << endl;
+			InputFile << "ratio_lower_diam: " << ratio_lower_diam << endl;
+			InputFile << "box_shape: " << box_shape << endl;
+			InputFile << "id: " << k+1 << endl << endl;
+
+			/***********************************************************************
+			 * Se escriben en el archivo los datos para el input de la red neuronal *
+			 ***********************************************************************/
+			
+			// para cada técnica (lsmear, rr, olf, smearmax, smearsum, smearsumrel)
+			for (int i = 0 ; i < 6 ; i++){
+
+				// se asignan los nuevos valores frontera
+				uplo = aux_uplo;
+				loup = aux_loup;
+
+				// aun no se han bisectado nodos
+				nb_cells = 0;
+
+				// si no hay nodos (es decir, es el primero), se le asigna uno desde el vector auxiliar
+				if(thebuffer->size() == 0){
+					//cout << aux.size() << endl; exit(1);
+					thebuffer->push(aux.front());
+				}
+
+				bool first_iteration = true;
+				
+				// variable para saber si la técnica se registró o no
+				bool technique_registered = false;
+				
+				// mientras queden nodos por revisar
+				while (!thebuffer->empty()) {
+
+					// el loup no ha cambiado
+					loup_changed=false;
+
+					// for double heap , choose randomly the buffer : top  has to be called before pop
+					// celda "padre" (la que se está revisando)
+					Cell *c = thebuffer->top();
+
+					if (trace >= 2) std::cout << " current box " << c->box << endl;
+
+					try {
+						// se crea un par de celdas que corresponden a los nodos "hijos" con cada técnica
+						pair<Cell*,Cell*> new_cells;
+						// new_cells = bsc.bisect(*c); 
+
+						// comienza la bisección dependiendo cada técnica
+						if (i == 0) //lsmear
+							new_cells=bsc.bisect(*c);
+						if (i == 1) //lf
+							new_cells=bisector_olf.bisect(*c);
+						if (i == 2) //rr
+							new_cells=bisector_rr.bisect(*c);
+						if (i == 3) //smearmax
+							new_cells=bisector_sm.bisect(*c);
+						if (i == 4) //smearsum
+							new_cells=bisector_ss.bisect(*c);
+						if (i == 5) //smearsumrel
+							new_cells=bisector_ssr.bisect(*c);
+
+						// se elimina el nodo "padre" de la lista de nodos por revisar
+						thebuffer->pop();
+
+	// 					// this is part of the modification 
+						if (first_iteration){  //to save the reference to the first node
+							first_iteration = false;
+						}
+						
+						else {
+							delete c; // se elimina el nodo "padre" de la memoria
+						} 
+
+						nb_cells+=2;  // counting the cells handled ( in previous versions nb_cells was the number of cells put into the buffer after being handled)
+						
+						// se manejan las celdas hijas
+						handle_cell(*new_cells.first);
+						handle_cell(*new_cells.second);
+
+						// se revisa si ya no hay más nodos por revisar
+						// thebuffer es el buffer que contiene los nodos próximos a visitar
+						// futurebuffer es el buffer que se hace en el feasiblediving
+						// si entra aquí, va a buscar la siguiente caja a bisectar
+
+						// si futurebuffer es 0, es porque se acabó la busqueda en profundidad
+						// se va a cambiar el nodo, y va a comenzar otra busqueda
+
+
+						if(thebuffer->futurebuffer.size() == 0){ //deadend has arrived
+							if (i == 0){
+								OutputFile << "LSMEAR ";
+								// std::cout << "LSMEAR ";
+							}
+							else if (i == 1){
+								OutputFile <<"LF ";
+								// std::cout <<"LF ";
+							}
+							else if (i == 2){
+								OutputFile << "RR ";
+								// std::cout << "RR ";
+							}
+							else if (i == 3){
+								OutputFile << "SM ";
+								// std::cout << "SM ";
+							}
+							else if (i == 4){
+								OutputFile << "SS ";
+								// std::cout << "SS ";
+							}
+							else if (i == 5){
+								OutputFile << "SSR ";
+								// std::cout << "SSR ";
+							}
+							OutputFile << nb_cells << endl;
+							technique_registered = true;
+							
+							// std::cout << nb_cells << endl;
+
+						// 	// REVISAR Y PREGUNTAR AL PROFE QUE HACE ESTO
+						// 	// finalmente esto guarda los nodos de la lsmear y elimina los que generan las técnicas (serían nodos thrashing)
+							int auxaux=thebuffer->size();
+							for (int tt = 0 ; tt < auxaux ; tt++){
+								if(i==0){ //se copia el buffer para poder usarlo en las siguientes fases
+									Cell *c = thebuffer->top();
+									aux.push(c);
+									thebuffer->pop();
+								} // este if corresponde a los nodos que generan las técnicas (rr, lf, sm, ss, ssr)
+								else{
+									Cell *c = thebuffer->top();
+									thebuffer->pop();
+									delete c; // deletes the cell.
+								} // esta parte corresponde a los nodos que genera lsmear
+
+						    }
+	// //						if(i==0){
+	// //
+	// //							for (int tt = 0 ; tt < auxaux ; tt++){
+	// //								Cell *c = thebuffer->CellHeap::top();
+	// //								aux.push(c);
+	// //								thebuffer->CellHeap::pop();
+	// //							}
+	// //						}
+	// //						thebuffer->CellHeap::flush();
+						} 
+							//else {
+							// 	cout << " still " << thebuffer->size() << " cells to process" << endl;
+							// }
+		//					else{
+		//						total_nodes = total_nodes+thebuffer->futurebuffer.size();
+		//					}
+
+						if (uplo_of_epsboxes == NEG_INFINITY) {
+							break;
+						}
+						if (loup_changed) {
+							// In case of a new upper bound (loup_changed == true), all the boxes
+							// with a lower bound greater than (loup - goal_prec) are removed and deleted.
+							// Note: if contraction was before bisection, we could have the problem
+							// that the current cell is removed by contractHeap. See comments in
+							// older version of the code (before revision 284).
+
+							double ymax=compute_ymax();
+
+							thebuffer->contract(ymax);
+
+							//cout << " now buffer is contracted and min=" << buffer.minimum() << endl;
+
+							// TODO: check if happens. What is the return code in this case?
+							if (ymax <= NEG_INFINITY) {
+								if (trace) std::cout << " infinite value for the minimum " << endl;
+								break;
+							}
+						}
+						update_uplo();
+
+						if (!anticipated_upper_bounding) // useless to check precision on objective if 'true'
+							if (get_obj_rel_prec()<rel_eps_f || get_obj_abs_prec()<abs_eps_f)
+								break;
+
+						if (timeout>0) timer.check(timeout); // TODO: not reentrant, JN: done
+						time = timer.get_time();
+
+					}
+
+					catch (NoBisectableVariableException& ) {
+						update_uplo_of_epsboxes((c->box)[goal_var].lb());
+						thebuffer->pop();
+						if(nb_cells!=0)
+							delete c; // deletes the cell.
+						update_uplo(); // the heap has changed -> recalculate the uplo (eg: if not in best-first search)
+					}
+
+				}
+
+				// en caso de no registrarse la técnica en el if del deadend
+				// se registra aquí
+				// puede ser que estos registros se hagan por término de precisión, factibilidad, etc
+				if (!technique_registered){
+					if (i == 0){
+						OutputFile << "LSMEAR ";
+						//std::cout << "LSMEAR no fd ";
+						// std::cout << "LSMEAR ";
+					}
+					else if (i == 1){
+						OutputFile <<"LF ";
+						//std::cout << "LF no fd ";
+						// std::cout <<"LF ";
+					}
+					else if (i == 2){
+						OutputFile << "RR ";
+						//std::cout << "RR no fd ";
+						// std::cout << "RR ";
+					}
+					else if (i == 3){
+						OutputFile << "SM ";
+						//std::cout << "SM no fd ";
+					}
+					else if (i == 4){
+						OutputFile << "SS ";
+						//std::cout << "SS no fd ";
+					}
+					else if (i == 5){
+						OutputFile << "SSR ";
+						//std::cout << "SSR no fd ";
+					}
+					OutputFile << nb_cells << endl;
+					//std::cout << nb_cells << " " << k+1 << endl;
+					// std::cout << nb_cells << endl;
+				}
+			}
+			OutputFile << "id: " << k+1 << endl << endl;
+			//std::cout << "id: " << k+1 << endl << endl;
+			Cell *c = aux.front();
+			aux.pop();
+			delete c; // deletes the cell.
+		}
+
+		InputFile << "------------------------------------------------"  << endl;
+		// std::cout << "------------------------------------------------"  << endl;
+		InputFile.close();
+		
+		OutputFile << "------------------------------------------------" << endl;
+		// std::cout << "------------------------------------------------" << endl;
+		OutputFile.close();
+		
 	 	timer.stop();
 	 	time = timer.get_time();
 
@@ -503,6 +975,7 @@ Optimizer::Status Optimizer::optimize() {
 	 	else
 	 		status = SUCCESS;
 	}
+
 	catch (TimeOutException& ) {
 		status = TIME_OUT;
 	}
@@ -529,15 +1002,16 @@ Optimizer::Status Optimizer::optimize() {
 		tmp[goal_var] = Interval(uplo,loup);
 		cov->add(tmp);
 	}
+
 	else {
 		cov->add(loup_point);
 	}
 
 	while (!buffer.empty()) {
 		Cell* cell=buffer.top();
-		if (extended_COV)
+		if (extended_COV) {
 			cov->add(cell->box);
-		else {
+		} else {
 			read_ext_box(cell->box,tmp);
 			cov->add(tmp);
 		}
@@ -576,76 +1050,77 @@ const char* white() {
 
 void Optimizer::report() {
 
-	if (!cov || !buffer.empty()) { // not started
-		cout << " not started." << endl;
-		return;
-	}
+	// if (!cov || !buffer.empty()) { // not started
+	// 	cout << " not started." << endl;
+	// 	return;
+	// }
 
-	switch(status) {
-	case SUCCESS:
-		cout << green() << " optimization successful!" << endl;
-		break;
-	case INFEASIBLE:
-		cout << red() << " infeasible problem" << endl;
-		break;
-	case NO_FEASIBLE_FOUND:
-		cout << red() << " no feasible point found (the problem may be infeasible)" << endl;
-		break;
-	case UNBOUNDED_OBJ:
-		cout << red() << " possibly unbounded objective (f*=-oo)" << endl;
-		break;
-	case TIME_OUT:
-		cout << red() << " time limit " << timeout << "s. reached " << endl;
-		break;
-	case UNREACHED_PREC:
-		cout << red() << " unreached precision" << endl;
-		break;
-	}
-	cout << white() <<  endl;
+	// switch(status) {
+	// case SUCCESS:
+	// 	cout << green() << " optimization successful!" << endl;
+	// 	break;
+	// case INFEASIBLE:
+	// 	cout << red() << " infeasible problem" << endl;
+	// 	break;
+	// case NO_FEASIBLE_FOUND:
+	// 	cout << red() << " no feasible point found (the problem may be infeasible)" << endl;
+	// 	break;
+	// case UNBOUNDED_OBJ:
+	// 	cout << red() << " possibly unbounded objective (f*=-oo)" << endl;
+	// 	break;
+	// case TIME_OUT:
+	// 	cout << red() << " time limit " << timeout << "s. reached " << endl;
+	// 	break;
+	// case UNREACHED_PREC:
+	// 	cout << red() << " unreached precision" << endl;
+	// 	break;
+	// }
+	// cout << white() <<  endl;
 
-	// No solution found and optimization stopped with empty buffer
-	// before the required precision is reached => means infeasible problem
-	if (status==INFEASIBLE) {
-		cout << " infeasible problem " << endl;
-	} else {
-		cout << " f* in\t[" << uplo << "," << loup << "]" << endl;
-		cout << "\t(best bound)" << endl << endl;
+	// // No solution found and optimization stopped with empty buffer
+	// // before the required precision is reached => means infeasible problem
+	// if (status==INFEASIBLE) {
+	// 	cout << " infeasible problem " << endl;
+	// } else {
+	// 	cout << " f* in\t[" << uplo << "," << loup << "]" << endl;
+	// 	cout << "\t(best bound)" << endl << endl;
 
-		if (loup==initial_loup)
-			cout << " x* =\t--\n\t(no feasible point found)" << endl;
-		else {
-			if (loup_finder.rigorous())
-				cout << " x* in\t" << loup_point << endl;
-			else
-				cout << " x* =\t" << loup_point.lb() << endl;
-			cout << "\t(best feasible point)" << endl;
-		}
-		cout << endl;
-		double rel_prec=get_obj_rel_prec();
-		double abs_prec=get_obj_abs_prec();
+	// 	if (loup==initial_loup)
+	// 		cout << " x* =\t--\n\t(no feasible point found)" << endl;
+	// 	else {
+	// 		if (loup_finder.rigorous())
+	// 			cout << " x* in\t" << loup_point << endl;
+	// 		else
+	// 			cout << " x* =\t" << loup_point.lb() << endl;
+	// 		cout << "\t(best feasible point)" << endl;
+	// 	}
+	// 	cout << endl;
+	// 	double rel_prec=get_obj_rel_prec();
+	// 	double abs_prec=get_obj_abs_prec();
 
-		cout << " relative precision on f*:\t" << rel_prec;
-		if (rel_prec <= rel_eps_f)
-			cout << green() << " [passed] " << white();
-		cout << endl;
+	// 	cout << " relative precision on f*:\t" << rel_prec;
+	// 	if (rel_prec <= rel_eps_f)
+	// 		cout << green() << " [passed] " << white();
+	// 	cout << endl;
 
-		cout << " absolute precision on f*:\t" << abs_prec;
-		if (abs_prec <= abs_eps_f)
-			cout << green() << " [passed] " << white();
-		cout << endl;
-	}
+	// 	cout << " absolute precision on f*:\t" << abs_prec;
+	// 	if (abs_prec <= abs_eps_f)
+	// 		cout << green() << " [passed] " << white();
+	// 	cout << endl;
+	// }
 
-	cout << " cpu time used:\t\t\t" << time << "s";
-	if (cov->time()!=time)
-		cout << " [total=" << cov->time() << "]";
-	cout << endl;
-	cout << " number of cells:\t\t" << nb_cells;
-	if (cov->nb_cells()!=nb_cells)
-		cout << " [total=" << cov->nb_cells() << "]";
-	cout << endl << endl;
-	
-	if (statistics) 
-		cout << "  ===== Statistics ====" << endl << endl << *statistics << endl;
+	// cout << " cpu time used:\t\t\t" << time << "s";
+	// if (cov->time()!=time)
+	// 	cout << " [total=" << cov->time() << "]";
+	// cout << endl;
+	// cout << " number of cells:\t\t" << nb_cells;
+	// if (cov->nb_cells()!=nb_cells)
+	// 	cout << " [total=" << cov->nb_cells() << "]";
+	// cout << endl << endl;
+
+	// if (statistics)
+	// 	cout << "  ===== Statistics ====" << endl << endl << *statistics << endl;
+	cout << nb_cells << " " << time << endl;
 }
 
 

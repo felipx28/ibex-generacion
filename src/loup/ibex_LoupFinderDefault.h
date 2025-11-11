@@ -48,7 +48,7 @@ public:
 	 *
 	 */
 	LoupFinderDefault(const System& sys, bool inHC4=true);
-
+	System sys;
 	/**
 	 * \brief Delete this.
 	 */

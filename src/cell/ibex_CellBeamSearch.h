@@ -80,6 +80,12 @@ public :
 	/** \brief The default value for the maximum beam size */
 	static constexpr unsigned int default_beamsize = 1;
 
+	/** \brief The current buffer, actual beam of limited size */
+	CellHeap&  currentbuffer;
+
+	/** \brief The nodes sons of a node from the current buffer */
+	CellHeap&  futurebuffer;
+
 protected :
 	/**
 	 * \brief Return the cost of a cell
@@ -94,11 +100,11 @@ protected :
 	/** \brief Empties the future buffer and distribute the cells between the current buffer and the global buffer*/
 	void move_buffers();
 
-	/** \brief The current buffer, actual beam of limited size */
-	CellHeap&  currentbuffer;
+	// /** \brief The current buffer, actual beam of limited size */
+	// CellHeap&  currentbuffer;
 
-	/** \brief The nodes sons of a node from the current buffer */
-	CellHeap&  futurebuffer;
+	// /** \brief The nodes sons of a node from the current buffer */
+	// CellHeap&  futurebuffer;
 
 };
 

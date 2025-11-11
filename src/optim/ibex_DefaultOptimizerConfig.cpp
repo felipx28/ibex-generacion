@@ -18,6 +18,8 @@
 #include "ibex_CellDoubleHeap.h"
 #include "ibex_SmearFunction.h"
 #include "ibex_LSmear.h"
+#include "ibex_RoundRobin.h"
+#include "ibex_LargestFirst.h"
 #include "ibex_LoupFinderDefault.h"
 #include "ibex_LoupFinderCertify.h"
 #include "ibex_Array.h"
@@ -200,10 +202,19 @@ Bsc& DefaultOptimizerConfig::get_bsc() {
 	// This question is probably related to the discussion #400
 	eps_x_extended[ext_sys.goal_var()] = OptimizerConfig::default_eps_x;
 
+
+	/****************************
+	** INICIO MODIFICACIONES **
+	****************************/
+		
 	return rec(new LSmear(
 			ext_sys, eps_x_extended,
 			rec(new OptimLargestFirst(ext_sys.goal_var(),true, eps_x_extended, default_bisect_ratio))),
 			BSC_TAG);
+
+	/****************************
+	** FIN MODIFICACIONES **
+	****************************/
 }
 
 LoupFinder& DefaultOptimizerConfig::get_loup_finder() {
