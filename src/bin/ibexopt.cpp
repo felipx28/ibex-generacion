@@ -135,7 +135,7 @@ int main(int argc, char** argv) {
 		 ** INICIO MOODIFICACIONES **
 		 ****************************/
 
-		std::ofstream InputFile("/home/felipe/Documents/magister/model2/input/prueba_nuevo_dataset/input_demostracion_cris.txt", std::ios::app);
+		std::ofstream InputFile("/home/felipe/Documents/magister/model2/input/prueba_nuevo_dataset/input_3_heuristicas.txt", std::ios::app);
 		string filename_with_route = filename.Get();
 		string filename_without_route = filename_with_route.substr(filename_with_route.find_last_of("/")+1);
 		
@@ -144,7 +144,7 @@ int main(int argc, char** argv) {
 
 		InputFile.close();
 
-		std::ofstream OutputFile("/home/felipe/Documents/magister/model2/output/prueba_nuevo_dataset/output_demostracion_cris.txt", std::ios::app);
+		std::ofstream OutputFile("/home/felipe/Documents/magister/model2/output/prueba_nuevo_dataset/output_3_heuristicas.txt", std::ios::app);
 		OutputFile << filename_without_route << endl;
 		OutputFile << "***********************************************************************************************************************" << endl;
 

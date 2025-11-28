@@ -700,8 +700,8 @@ Optimizer::Status Optimizer::optimize() {
 		// Total de restricciones del sistema
 		int total_constraints = system.nb_ctr;
 		
-		std::ofstream InputFile("/home/felipe/Documents/magister/model2/input/prueba_nuevo_dataset/input_demostracion_cris.txt", std::ios::app);
-		std::ofstream OutputFile("/home/felipe/Documents/magister/model2/output/prueba_nuevo_dataset/output_demostracion_cris.txt", std::ios::app);
+		std::ofstream InputFile("/home/felipe/Documents/magister/model2/input/prueba_nuevo_dataset/input_3_heuristicas.txt", std::ios::app);
+		std::ofstream OutputFile("/home/felipe/Documents/magister/model2/output/prueba_nuevo_dataset/output_3_heuristicas.txt", std::ios::app);
 
 		if (!InputFile.is_open()) {
 			cerr << "No se pudo abrir el archivo. Comprueba la ruta y permisos." << endl;
