@@ -524,503 +524,385 @@ void Optimizer::start(const CovOptimData& data, double obj_init_bound) {
 //     return std::exp(-fabs(diff) / scale); // Decay exponencial
 // }
 
-double calculate_bounds_ratios(double lb, double ub, double epsilon, int id) {
-    static double initial_lb, initial_ub, initial_obj_range;
-    static bool initial_bounds_set = false;
-    
-    // Si es la primera llamada (id == 1), guardar valores iniciales
-    if (id == 1) {
-        initial_lb = lb;
-        initial_ub = ub;
-        initial_obj_range = initial_ub - initial_lb;
-        initial_bounds_set = true;
+
+
+// ===============================================================================
+//   ESTRUCTURAS Y FUNCIONES HELPER PARA GENERACIÓN DE DATOS (DATA SCIENCE)
+// ===============================================================================
+
+// Estructura para capturar la "foto" del nodo raíz/inicial y comparar progreso
+struct InitialState {
+    double lb_obj;
+    double ub_obj;
+    double obj_range;
+    double max_diam;
+    double min_diam;
+    bool valid_bounds; 
+
+    InitialState(double lb, double ub, double max_d, double min_d) 
+        : lb_obj(lb), ub_obj(ub), max_diam(max_d), min_diam(min_d) {
+        
+        obj_range = ub - lb;
+        // Validamos si tenemos un rango finito y útil para comparar
+        valid_bounds = std::isfinite(lb) && std::isfinite(ub) && 
+                       std::isfinite(obj_range) && std::abs(obj_range) > 1e-12;
     }
+};
+
+// ===============================================================================
+//   FUNCIONES HELPER CORREGIDAS (LOG SCALE)
+// ===============================================================================
+
+// Calcula LOG10 de la reducción del rango objetivo
+// Retorna: 0.0 (Sin cambio) hasta -30.0 (Reducción masiva)
+double calculate_bounds_log_ratio(double current_lb, double current_ub, const InitialState& init) {
+    if (!init.valid_bounds) return 0.0; 
+
+    double current_range = current_ub - current_lb;
     
-    // Verificar que se hayan establecido los valores iniciales
-    if (!initial_bounds_set) {
-        return -5.0; // Error: no se han establecido valores iniciales
-    }
+    // Si el rango es inválido o negativo, retornamos 0 (sin progreso)
+    if (!std::isfinite(current_range) || current_range < 0) return 0.0;
+
+    // Evitamos división por cero y log(0)
+    double ratio = current_range / (init.obj_range + 1e-100); 
     
-    // Calcular rango actual
-    double current_obj_range = ub - lb;
+    // Si el ratio es > 1 (raro, el rango creció), lo acotamos a 1
+    if (ratio > 1.0) ratio = 1.0;
     
-    // Edge cases para bounds iniciales
-    bool initial_bounds_infinite = (!std::isfinite(initial_lb) || !std::isfinite(initial_ub));
-    bool initial_bounds_invalid = (!std::isfinite(initial_obj_range) || std::abs(initial_obj_range) < epsilon);
-    
-    // Edge cases para bounds actuales
-    bool current_bounds_invalid = (!std::isfinite(current_obj_range) || std::abs(current_obj_range) < epsilon);
-    
-    // Caso 1: Current bounds inválidos
-    if (current_bounds_invalid) {
-        return -5.0; // Valor sentinel
-    }
-    
-    // Caso 2: Bounds iniciales problemáticos - usar solo rango actual
-    if (initial_bounds_infinite || initial_bounds_invalid) {
-        double log_current_range = std::log10(current_obj_range);
-        return std::max(-5.0, std::min(5.0, log_current_range));
-    }
-    
-    // Caso 3: Normal - calcular progreso relativo
-    double progress_ratio = current_obj_range / initial_obj_range;
-    return std::max(0.0, std::min(1.0, progress_ratio));
+    // Si el ratio es extremadamente pequeño (casi cero), le ponemos un piso para no dar -inf
+    if (ratio < 1e-30) ratio = 1e-30;
+
+    return std::log10(ratio); // Retornará valores entre 0.0 y -30.0
 }
 
-double calculate_diameter_shape(double bigger_diam, double lower_diam, double epsilon) {
-    // Edge cases
-    if (lower_diam < epsilon || !std::isfinite(lower_diam)) return 0.0;
-    if (bigger_diam < epsilon || !std::isfinite(bigger_diam)) return 0.0;
+// Calcula LOG10 del progreso de reducción de diámetro
+double calculate_diam_log_reduction(double current_diam, double initial_diam) {
+    if (initial_diam < 1e-12 || !std::isfinite(initial_diam)) return 0.0; 
     
-    double diam_ratio = bigger_diam / lower_diam;
-    if (diam_ratio <= 1.0 + epsilon) return 0.0; // Box cuadrado
-    
-    double log_diam_ratio = std::log10(diam_ratio);
-    return std::max(-3.0, std::min(3.0, log_diam_ratio));
+    double ratio = current_diam / initial_diam;
+
+    if (ratio > 1.0) ratio = 1.0;
+    if (ratio < 1e-30) ratio = 1e-30; // Piso de seguridad
+
+    return std::log10(ratio); // Retornará valores entre 0.0 y -30.0
 }
 
-double calculate_diameter_progress(double current_diam, double epsilon, int id, bool is_bigger_diam) {
-    static double initial_bigger_diam, initial_lower_diam;
-    static bool initial_set = false;
+// La función de Shape se mantiene igual (ya usaba log10)
+double calculate_box_shape(double max_diam, double min_diam, double epsilon = 1e-9) {
+    if (min_diam < epsilon || !std::isfinite(min_diam)) return 5.0; 
+    if (max_diam < epsilon || !std::isfinite(max_diam)) return 0.0; 
     
-    if (id == 1) {
-        if (is_bigger_diam) {
-            initial_bigger_diam = current_diam;
-        } else {
-            initial_lower_diam = current_diam;
-        }
-        initial_set = true;
-        return 1.0; // Valor inicial
-    }
-   
-    if (!initial_set) return 0.5;
+    double ratio = max_diam / min_diam;
+    double log_ratio = std::log10(ratio);
     
-    double initial_value = is_bigger_diam ? initial_bigger_diam : initial_lower_diam;
-    if (initial_value < epsilon) return 0.5;
-    
-    double progress = current_diam / initial_value;
-    return std::max(0.0, std::min(1.0, progress));
-} 
+    return std::max(0.0, std::min(5.0, log_ratio));
+}
 
 Optimizer::Status Optimizer::optimize() {
-	Timer timer;
-	timer.start();
+    Timer timer;
+    timer.start();
 
-	update_uplo();
+    update_uplo();
 
-	try {
+    try {
 
-		/*****************************************
-		 ** DECLARACIÓN DE BUFFER Y LOUP FINDER **
-		 *****************************************/
+        /*****************************************
+         ** CONFIGURACIÓN INICIAL           **
+         *****************************************/
 
-		/**
-		 * \note dynamic_cast convierte de manera "forzosa" el puntero de la clase base a un puntero de la clase derivada.
-		 */ 
+        CellBeamSearch * thebuffer = dynamic_cast<CellBeamSearch*>(&buffer);
+        LoupFinderDefault * lfd = dynamic_cast<LoupFinderDefault*>(&loup_finder);
 
-		CellBeamSearch * thebuffer = dynamic_cast<CellBeamSearch*>(&buffer);
-		LoupFinderDefault * lfd = dynamic_cast<LoupFinderDefault*>(&loup_finder);
+        queue<Cell*> aux; 
 
-		//vector of cells
-		queue<Cell*> aux; 
+        // 1. Llenar la cola auxiliar con lo que haya en el buffer inicial
+        if (!thebuffer->empty()) {
+            while(!thebuffer->empty()) {
+                aux.push(thebuffer->pop());
+            }
+        } else if (!buffer.empty()) {
+             // Fallback defensivo
+             aux.push(thebuffer->top()); 
+        }
 
-		//variable auxiliar para guardar el valor de la caja "inicial"
-		IntervalVector aux_box = thebuffer->top()->box;
-		double prec = 1e-7;
+        // 2. CONFIGURACIÓN DEL ESTADO INICIAL (REEMPLAZA A STATIC)
+        // Capturamos el estado del primer nodo disponible para usarlo como línea base
+        // de comparación para todos los nodos subsiguientes (progreso relativo al inicio).
+        InitialState* global_root_state = nullptr;
 
-		/***********************************
-		 ** DECLARACIÓN DE LOS BISECTORES **
-		 ***********************************/
-		OptimLargestFirst bisector_olf(goal_var, true, prec, 0.5);
-		RoundRobin bisector_rr(prec, 0.5);
+        if (!aux.empty()) {
+            Cell* root = aux.front();
+            double r_lb = lfd->finder_x_taylor.sys.goal->eval(root->box).lb();
+            double r_ub = lfd->finder_x_taylor.sys.goal->eval(root->box).ub();
+            double r_max = root->box.max_diam();
+            double r_min = root->box.min_diam();
+            
+            global_root_state = new InitialState(r_lb, r_ub, r_max, r_min);
+        } else {
+            // Caso borde: cola vacía, creamos dummy para no romper el código
+            global_root_state = new InitialState(0, 0, 1, 1);
+        }
 
-		// obtención del sistema para bisectores smear
-		System system = lfd->finder_x_taylor.sys;
+        double prec = 1e-7;
+
+        /***********************************
+         ** BIS ECTORES Y ARCHIVOS      **
+         ***********************************/
+        OptimLargestFirst bisector_olf(goal_var, true, prec, 0.5);
+        RoundRobin bisector_rr(prec, 0.5);
+        System system = lfd->finder_x_taylor.sys;
+
+		// -- Heurísticas Smear --
 		SmearMax bisector_sm(system,prec);
 		SmearSum bisector_ss(system,prec);
 		SmearSumRelative bisector_ssr(system,prec);
-		
-		// upper lowerbound
-		double aux_uplo = uplo;
-		// lower upperbound
-		double aux_loup = loup;
-		// región interior donde se saca el uplo y loup
-		IntervalVector inner=aux_box;
-		
-		//		while(!buffer.empty())
-		// simulaciones son la cantidad de datos que se generarán
-		int num_sim = 1000;
-		double epsilon = 1e-9;
+        
+        // Variables globales backup
+        double aux_uplo = uplo;
+        double aux_loup = loup;
+        
+        int num_sim = 1000;
+        double epsilon = 1e-9;
 
-		// se ingresa al vector la caja inicial del buffer (primer nodo a tratar)
-		aux.push(thebuffer->top());
-		
-		// se obtiene la celda actual para el análisis
-		// aqui calculamos los bounds iniciales para posteriormente calcular una proporción
-		double lb_f_obj_inicial = lfd->finder_x_taylor.sys.goal->eval(aux.front()->box).lb();
-		double ub_f_obj_inicial = lfd->finder_x_taylor.sys.goal->eval(aux.front()->box).ub();
-		double bigger_diam_inicial = aux.front()->box.max_diam();
-		double lower_diam_inicial = aux.front()->box.min_diam();		
+        // Archivos
+        std::ofstream InputFile("/home/felipe/Documents/magister/model2/input/prueba_nuevo_dataset/input_14_dic_ratios.txt", std::ios::app);
+        std::ofstream OutputFile("/home/felipe/Documents/magister/model2/output/prueba_nuevo_dataset/output_14_dic_ratios.txt", std::ios::app);
 
-		std::cout << "lb_f_obj_inicial: " << lb_f_obj_inicial << std::endl;
-		std::cout << "ub_f_obj_inicial: " << ub_f_obj_inicial << std::endl;
-		std::cout << "bigger_diam_inicial: " << bigger_diam_inicial << std::endl;
-		std::cout << "lower_diam_inicial: " << lower_diam_inicial << std::endl;
-		// estas variables son las que utilizaremos para calcular los límites dentro de las simulaciones.
-		double lb_f_obj;
-		double ub_f_obj;
-		double bigger_diam;
-		double lower_diam;
-		
-		// Variables finales que se utilizarán como input en la red neuronal
-		int variables = n;
-		BitSet active;
-		double ratio_bounds;
-		double ratio_bigger_diam;
-		double ratio_lower_diam;
-		double box_shape;
-		
-		std::ofstream InputFile("/home/felipe/Documents/magister/model2/input/prueba_nuevo_dataset/input_demostracion_cris.txt", std::ios::app);
-		std::ofstream OutputFile("/home/felipe/Documents/magister/model2/output/prueba_nuevo_dataset/output_demostracion_cris.txt", std::ios::app);
+        if (!InputFile.is_open() || !OutputFile.is_open()) {
+            cerr << "Error abriendo archivos de texto." << endl; exit(1);
+        }
 
-		if (!InputFile.is_open()) {
-			cerr << "No se pudo abrir el archivo. Comprueba la ruta y permisos." << endl;
-			exit(1);
-		}
+        // =========================================================
+        //                 BUCLE DE SIMULACIONES (K)
+        // =========================================================
+        for (int k = 0 ; k < num_sim ; k++){
 
-		if (!OutputFile.is_open()) {
-			cerr << "No se pudo abrir el archivo. Comprueba la ruta y permisos." << endl;
-			exit(1);
-		}
+            if(aux.empty()) break;
 
-		// se ingresa la cantidad de simulaciones que se realizarán
-		for (int k = 0 ; k < num_sim ; k++){
+            // --- PASO 1: OBTENER SEMILLA (SIN SACAR DE LA COLA) ---
+            Cell* seed_cell = aux.front();
 
-			// si el tamaño del vector es 0, se sale del ciclo
-			if(aux.size() == 0) break;
+            // Obtener valores actuales
+            double cur_lb = lfd->finder_x_taylor.sys.goal->eval(seed_cell->box).lb();
+            double cur_ub = lfd->finder_x_taylor.sys.goal->eval(seed_cell->box).ub();
+            double cur_max_diam = seed_cell->box.max_diam();
+            double cur_min_diam = seed_cell->box.min_diam();
+            BitSet active = lfd->finder_x_taylor.sys.active_ctrs(seed_cell->box);
+            int variables = n;
 
-			lb_f_obj = lfd->finder_x_taylor.sys.goal->eval(aux.front()->box).lb();
-			ub_f_obj = lfd->finder_x_taylor.sys.goal->eval(aux.front()->box).ub();
-			bigger_diam = aux.front()->box.max_diam();
-			lower_diam = aux.front()->box.min_diam();
-			active = lfd->finder_x_taylor.sys.active_ctrs(aux.front()->box);
-			
-			// calculamos los ratios de las 4 variables numéricas
-			ratio_bounds = calculate_bounds_ratios(lb_f_obj, ub_f_obj, epsilon, k+1);
-			ratio_bigger_diam = calculate_diameter_progress(bigger_diam, epsilon, k+1, true); // true porque es bigger_diam
-			ratio_lower_diam = calculate_diameter_progress(lower_diam, epsilon, k+1, false); // false porque es lower_diam
-			box_shape = calculate_diameter_shape(bigger_diam, lower_diam, epsilon);
+            // Logs iniciales debug
+            // if (k==0) {
+            //     std::cout << "Initial Root - LB: " << cur_lb << " UB: " << cur_ub << std::endl;
+            // }
+            
+            // --- PASO 2: CÁLCULO DE FEATURES EN ESCALA LOGARÍTMICA ---
+            // Nota el cambio de nombre de las variables y funciones
+            double log_ratio_bounds = calculate_bounds_log_ratio(cur_lb, cur_ub, *global_root_state);
+            double log_ratio_bigger = calculate_diam_log_reduction(cur_max_diam, global_root_state->max_diam);
+            double log_ratio_lower  = calculate_diam_log_reduction(cur_min_diam, global_root_state->min_diam);
+            
+            // Box shape ya está en log, así que está bien
+            double box_shape = calculate_box_shape(cur_max_diam, cur_min_diam, epsilon);
 
-			InputFile << "variables: " << variables << endl;
-			InputFile << "restricciones: " << active.size() << endl;
-			InputFile << "ratio_bounds: " << ratio_bounds << endl;
-			InputFile << "ratio_bigger_diam: " << ratio_bigger_diam << endl;
-			InputFile << "ratio_lower_diam: " << ratio_lower_diam << endl;
-			InputFile << "box_shape: " << box_shape << endl;
-			InputFile << "id: " << k+1 << endl << endl;
+            // Escribir Input (Actualiza los nombres en el txt si quieres ser explícito)
+            InputFile << "variables: " << variables << endl;
+            InputFile << "restricciones: " << active.size() << endl;
+            InputFile << "log_ratio_bounds: " << log_ratio_bounds << endl;      // Valor esperado: -0.5, -10.0, -25.0, etc.
+            InputFile << "log_ratio_bigger: " << log_ratio_bigger << endl;
+            InputFile << "log_ratio_lower: " << log_ratio_lower << endl;
+            InputFile << "box_shape: " << box_shape << endl;
+            InputFile << "id: " << k+1 << endl << endl;
 
-			/***********************************************************************
-			 * Se escriben en el archivo los datos para el input de la red neuronal *
-			 ***********************************************************************/
-			
-			// para cada técnica (lsmear, rr, olf, smearmax, smearsum, smearsumrel)
-			for (int i = 0 ; i < 6 ; i++){
+            // =====================================================
+            //            BUCLE DE HEURÍSTICAS (I)
+            // =====================================================
+            for (int i = 0 ; i < 6 ; i++){
 
-				// se asignan los nuevos valores frontera
-				uplo = aux_uplo;
-				loup = aux_loup;
+                // 1. Restaurar bounds globales (Justicia)
+                uplo = aux_uplo;
+                loup = aux_loup;
+                nb_cells = 0;
 
-				// aun no se han bisectado nodos
-				nb_cells = 0;
+                // 2. Limpiar buffer
+                buffer.flush();
 
-				// si no hay nodos (es decir, es el primero), se le asigna uno desde el vector auxiliar
-				if(thebuffer->size() == 0){
-					//cout << aux.size() << endl; exit(1);
-					thebuffer->push(aux.front());
-				}
+                // 3. CLONACIÓN (Fairness): Copia independiente de la caja semilla
+				Cell* current_root = new Cell(*seed_cell); 
+				thebuffer->push(current_root);
 
-				bool first_iteration = true;
-				
-				// variable para saber si la técnica se registró o no
-				bool technique_registered = false;
-				
-				// mientras queden nodos por revisar
-				while (!thebuffer->empty()) {
+				// // ================== DEBUG BLOCK INICIO ==================
+				// std::cout << std::setprecision(16); // Máxima precisión para ver diferencias mínimas
+				// std::cout << "\n[DEBUG CHECK] Iteracion K=" << k << " Heuristica I=" << i << std::endl;
 
-					// el loup no ha cambiado
-					loup_changed=false;
+				// // 1. Verificación de Punteros (Deben ser DIFERENTES)
+				// std::cout << "  Addr Semilla: " << seed_cell << std::endl;
+				// std::cout << "  Addr Clon   : " << current_root << std::endl;
+				// if (seed_cell != current_root) std::cout << "  -> MEMORIA: [OK] Son objetos distintos." << std::endl;
+				// else std::cout << "  -> MEMORIA: [ERROR CRITICO] Es el mismo puntero!" << std::endl;
 
-					// for double heap , choose randomly the buffer : top  has to be called before pop
-					// celda "padre" (la que se está revisando)
-					Cell *c = thebuffer->top();
+				// // 2. Verificación de Contenido (Deben ser IDÉNTICOS)
+				// // IBEX permite comparar IntervalVectors directamente, pero vamos a mirar la distancia
+				// double diff = distance(seed_cell->box,current_root->box); // Distancia entre cajas
+				// std::cout << "  Diferencia de Cajas: " << diff << std::endl;
 
-					if (trace >= 2) std::cout << " current box " << c->box << endl;
+				// if (diff == 0.0) std::cout << "  -> CONTENIDO: [OK] Las cajas son idénticas bit a bit." << std::endl;
+				// else std::cout << "  -> CONTENIDO: [ERROR] La caja clonada es diferente." << std::endl;
 
-					try {
-						// se crea un par de celdas que corresponden a los nodos "hijos" con cada técnica
-						pair<Cell*,Cell*> new_cells;
-						// new_cells = bsc.bisect(*c); 
+				// // 3. Verificación de Estado Global (LOUP debe estar reseteado)
+				// std::cout << "  Loup Actual: " << loup << " | Loup Esperado: " << aux_loup << std::endl;
+				// if (loup == aux_loup) std::cout << "  -> GLOBALES: [OK] Loup reseteado." << std::endl;
+				// else std::cout << "  -> GLOBALES: [ERROR] El loup está sucio." << std::endl;
+				// // ================== DEBUG BLOCK FIN ==================
 
-						// comienza la bisección dependiendo cada técnica
-						if (i == 0) //lsmear
-							new_cells=bsc.bisect(*c);
-						if (i == 1) //lf
-							new_cells=bisector_olf.bisect(*c);
-						if (i == 2) //rr
-							new_cells=bisector_rr.bisect(*c);
-						if (i == 3) //smearmax
-							new_cells=bisector_sm.bisect(*c);
-						if (i == 4) //smearsum
-							new_cells=bisector_ss.bisect(*c);
-						if (i == 5) //smearsumrel
-							new_cells=bisector_ssr.bisect(*c);
+                bool first_iteration = true;
+                
+                // --- Diving Loop ---
+                while (!thebuffer->empty()) {
 
-						// se elimina el nodo "padre" de la lista de nodos por revisar
-						thebuffer->pop();
+                    loup_changed=false;
+                    Cell *c = thebuffer->top();
 
-	// 					// this is part of the modification 
-						if (first_iteration){  //to save the reference to the first node
-							first_iteration = false;
-						}
-						
-						else {
-							delete c; // se elimina el nodo "padre" de la memoria
-						} 
+                    try {
+                        pair<Cell*,Cell*> new_cells;
 
-						nb_cells+=2;  // counting the cells handled ( in previous versions nb_cells was the number of cells put into the buffer after being handled)
-						
-						// se manejan las celdas hijas
-						handle_cell(*new_cells.first);
-						handle_cell(*new_cells.second);
+                        if (i == 0) new_cells=bsc.bisect(*c);           // LSMEAR
+                        if (i == 1) new_cells=bisector_olf.bisect(*c);  // LF
+                        if (i == 2) new_cells=bisector_rr.bisect(*c);   // RR
+						if (i == 3) new_cells=bisector_sm.bisect(*c);   // SMEAR MAX
+						if (i == 4) new_cells=bisector_ss.bisect(*c);   // SMEAR SUM
+						if (i == 5) new_cells=bisector_ssr.bisect(*c);  // SMEAR SUM RELATIVE
 
-						// se revisa si ya no hay más nodos por revisar
-						// thebuffer es el buffer que contiene los nodos próximos a visitar
-						// futurebuffer es el buffer que se hace en el feasiblediving
-						// si entra aquí, va a buscar la siguiente caja a bisectar
+                        thebuffer->pop();
 
-						// si futurebuffer es 0, es porque se acabó la busqueda en profundidad
-						// se va a cambiar el nodo, y va a comenzar otra busqueda
+                        // Gestión de memoria nodos procesados
+                        if (first_iteration){
+                            first_iteration = false;
+                            delete c; // Borramos el clon root
+                        } else {
+                            delete c; // Borramos nodos intermedios
+                        } 
 
+                        nb_cells += 2;
+                        handle_cell(*new_cells.first);
+                        handle_cell(*new_cells.second);
 
-						if(thebuffer->futurebuffer.size() == 0){ //deadend has arrived
-							if (i == 0){
-								OutputFile << "LSMEAR ";
-								// std::cout << "LSMEAR ";
-							}
-							else if (i == 1){
-								OutputFile <<"LF ";
-								// std::cout <<"LF ";
-							}
-							else if (i == 2){
-								OutputFile << "RR ";
-								// std::cout << "RR ";
-							}
-							else if (i == 3){
-								OutputFile << "SM ";
-								// std::cout << "SM ";
-							}
-							else if (i == 4){
-								OutputFile << "SS ";
-								// std::cout << "SS ";
-							}
-							else if (i == 5){
-								OutputFile << "SSR ";
-								// std::cout << "SSR ";
-							}
-							OutputFile << nb_cells << endl;
-							technique_registered = true;
-							
-							// std::cout << nb_cells << endl;
+                        // --- DEADEND / CLASIFICACIÓN ---
+                        if(thebuffer->futurebuffer.size() == 0){ 
+                            
+                            if (i == 0) OutputFile << "LSMEAR: ";
+                            else if (i == 1) OutputFile <<"LF: ";
+                            else if (i == 2) OutputFile << "RR: ";
+							else if (i == 3) OutputFile << "SM: ";
+							else if (i == 4) OutputFile << "SS: ";
+							else if (i == 5) OutputFile << "SSR: ";
+                            // ...
+                            
+                            OutputFile << nb_cells << endl;
+                            
+                            // Gestión diferenciada de hijos
+                            int current_size = thebuffer->size();
+                            if(i == 0) { 
+                                // LSMEAR define el futuro: guardar hijos en aux
+                                for (int tt = 0 ; tt < current_size ; tt++){
+                                    Cell *survivor = thebuffer->top();
+                                    thebuffer->pop();
+                                    aux.push(survivor); 
+                                }
+                            } else {
+                                // Otros: solo pruebas, borrar hijos
+                                for (int tt = 0 ; tt < current_size ; tt++){
+                                    Cell *trash = thebuffer->top();
+                                    thebuffer->pop();
+                                    delete trash;
+                                }
+                            }
+                        } 
 
-						// 	// REVISAR Y PREGUNTAR AL PROFE QUE HACE ESTO
-						// 	// finalmente esto guarda los nodos de la lsmear y elimina los que generan las técnicas (serían nodos thrashing)
-							int auxaux=thebuffer->size();
-							for (int tt = 0 ; tt < auxaux ; tt++){
-								if(i==0){ //se copia el buffer para poder usarlo en las siguientes fases
-									Cell *c = thebuffer->top();
-									aux.push(c);
-									thebuffer->pop();
-								} // este if corresponde a los nodos que generan las técnicas (rr, lf, sm, ss, ssr)
-								else{
-									Cell *c = thebuffer->top();
-									thebuffer->pop();
-									delete c; // deletes the cell.
-								} // esta parte corresponde a los nodos que genera lsmear
+                        // Chequeos IBEX
+                        if (uplo_of_epsboxes == NEG_INFINITY) break;
+                        if (loup_changed) {
+                            double ymax=compute_ymax();
+                            thebuffer->contract(ymax);
+                            if (ymax <= NEG_INFINITY) break;
+                        }
+                        update_uplo();
+                        if (timeout>0) timer.check(timeout);
 
-						    }
-	// //						if(i==0){
-	// //
-	// //							for (int tt = 0 ; tt < auxaux ; tt++){
-	// //								Cell *c = thebuffer->CellHeap::top();
-	// //								aux.push(c);
-	// //								thebuffer->CellHeap::pop();
-	// //							}
-	// //						}
-	// //						thebuffer->CellHeap::flush();
-						} 
-							//else {
-							// 	cout << " still " << thebuffer->size() << " cells to process" << endl;
-							// }
-		//					else{
-		//						total_nodes = total_nodes+thebuffer->futurebuffer.size();
-		//					}
+                    } catch (NoBisectableVariableException& ) {
+                        update_uplo_of_epsboxes((c->box)[goal_var].lb());
+                        thebuffer->pop();
+                        if(nb_cells!=0) delete c;
+                        update_uplo();
+                    }
+                } // Fin While Diving
 
-						if (uplo_of_epsboxes == NEG_INFINITY) {
-							break;
-						}
-						if (loup_changed) {
-							// In case of a new upper bound (loup_changed == true), all the boxes
-							// with a lower bound greater than (loup - goal_prec) are removed and deleted.
-							// Note: if contraction was before bisection, we could have the problem
-							// that the current cell is removed by contractHeap. See comments in
-							// older version of the code (before revision 284).
+            } // Fin For Heurísticas
 
-							double ymax=compute_ymax();
+            OutputFile << "id: " << k+1 << endl << endl;
 
-							thebuffer->contract(ymax);
+            // --- PASO 3: LIMPIEZA FINAL DE SEMILLA ---
+            aux.pop();      // Sacar de la cola
+            delete seed_cell; // Liberar memoria
 
-							//cout << " now buffer is contracted and min=" << buffer.minimum() << endl;
+        } // Fin For Simulaciones
 
-							// TODO: check if happens. What is the return code in this case?
-							if (ymax <= NEG_INFINITY) {
-								if (trace) std::cout << " infinite value for the minimum " << endl;
-								break;
-							}
-						}
-						update_uplo();
+        // Limpieza de memoria de Data Science
+        if (global_root_state) delete global_root_state;
 
-						if (!anticipated_upper_bounding) // useless to check precision on objective if 'true'
-							if (get_obj_rel_prec()<rel_eps_f || get_obj_abs_prec()<abs_eps_f)
-								break;
+        InputFile << "------------------------------------------------"  << endl;
+        InputFile.close();
+        OutputFile << "------------------------------------------------" << endl;
+        OutputFile.close();
+        
+        timer.stop();
+        time = timer.get_time();
 
-						if (timeout>0) timer.check(timeout); // TODO: not reentrant, JN: done
-						time = timer.get_time();
+        // Estado final
+        if (uplo_of_epsboxes == NEG_INFINITY) status = UNBOUNDED_OBJ;
+        else if (uplo_of_epsboxes == POS_INFINITY && (loup==POS_INFINITY || (loup==initial_loup && abs_eps_f==0 && rel_eps_f==0))) status = INFEASIBLE;
+        else if (loup==initial_loup) status = NO_FEASIBLE_FOUND;
+        else if (get_obj_rel_prec()>rel_eps_f && get_obj_abs_prec()>abs_eps_f) status = UNREACHED_PREC;
+        else status = SUCCESS;
+    }
 
-					}
+    catch (TimeOutException& ) {
+        status = TIME_OUT;
+    }
 
-					catch (NoBisectableVariableException& ) {
-						update_uplo_of_epsboxes((c->box)[goal_var].lb());
-						thebuffer->pop();
-						if(nb_cells!=0)
-							delete c; // deletes the cell.
-						update_uplo(); // the heap has changed -> recalculate the uplo (eg: if not in best-first search)
-					}
+    // Reporte final para COV (sin cambios)
+    for (int i=0; i<(extended_COV ? n+1 : n); i++)
+        cov->data->_optim_var_names.push_back(string(""));
 
-				}
+    cov->data->_optim_optimizer_status = (unsigned int) status;
+    cov->data->_optim_uplo = uplo;
+    cov->data->_optim_uplo_of_epsboxes = uplo_of_epsboxes;
+    cov->data->_optim_loup = loup;
+    cov->data->_optim_time += time;
+    cov->data->_optim_nb_cells += nb_cells;
+    cov->data->_optim_loup_point = loup_point;
 
-				// en caso de no registrarse la técnica en el if del deadend
-				// se registra aquí
-				// puede ser que estos registros se hagan por término de precisión, factibilidad, etc
-				if (!technique_registered){
-					if (i == 0){
-						OutputFile << "LSMEAR ";
-						//std::cout << "LSMEAR no fd ";
-						// std::cout << "LSMEAR ";
-					}
-					else if (i == 1){
-						OutputFile <<"LF ";
-						//std::cout << "LF no fd ";
-						// std::cout <<"LF ";
-					}
-					else if (i == 2){
-						OutputFile << "RR ";
-						//std::cout << "RR no fd ";
-						// std::cout << "RR ";
-					}
-					else if (i == 3){
-						OutputFile << "SM ";
-						//std::cout << "SM no fd ";
-					}
-					else if (i == 4){
-						OutputFile << "SS ";
-						//std::cout << "SS no fd ";
-					}
-					else if (i == 5){
-						OutputFile << "SSR ";
-						//std::cout << "SSR no fd ";
-					}
-					OutputFile << nb_cells << endl;
-					//std::cout << nb_cells << " " << k+1 << endl;
-					// std::cout << nb_cells << endl;
-				}
-			}
-			OutputFile << "id: " << k+1 << endl << endl;
-			//std::cout << "id: " << k+1 << endl << endl;
-			Cell *c = aux.front();
-			aux.pop();
-			delete c; // deletes the cell.
-		}
+    IntervalVector tmp(extended_COV ? n+1 : n);
 
-		InputFile << "------------------------------------------------"  << endl;
-		// std::cout << "------------------------------------------------"  << endl;
-		InputFile.close();
-		
-		OutputFile << "------------------------------------------------" << endl;
-		// std::cout << "------------------------------------------------" << endl;
-		OutputFile.close();
-		
-	 	timer.stop();
-	 	time = timer.get_time();
+    if (extended_COV) {
+        write_ext_box(loup_point, tmp);
+        tmp[goal_var] = Interval(uplo,loup);
+        cov->add(tmp);
+    } else {
+        cov->add(loup_point);
+    }
 
-		// No solution found and optimization stopped with empty buffer
-		// before the required precision is reached => means infeasible problem
-	 	if (uplo_of_epsboxes == NEG_INFINITY)
-	 		status = UNBOUNDED_OBJ;
-	 	else if (uplo_of_epsboxes == POS_INFINITY && (loup==POS_INFINITY || (loup==initial_loup && abs_eps_f==0 && rel_eps_f==0)))
-	 		status = INFEASIBLE;
-	 	else if (loup==initial_loup)
-	 		status = NO_FEASIBLE_FOUND;
-	 	else if (get_obj_rel_prec()>rel_eps_f && get_obj_abs_prec()>abs_eps_f)
-	 		status = UNREACHED_PREC;
-	 	else
-	 		status = SUCCESS;
-	}
+    while (!buffer.empty()) {
+        Cell* cell=buffer.top();
+        if (extended_COV) cov->add(cell->box);
+        else {
+            read_ext_box(cell->box,tmp);
+            cov->add(tmp);
+        }
+        delete buffer.pop();
+    }
 
-	catch (TimeOutException& ) {
-		status = TIME_OUT;
-	}
-
-	/* TODO: cannot retrieve variable names here. */
-	for (int i=0; i<(extended_COV ? n+1 : n); i++)
-		cov->data->_optim_var_names.push_back(string(""));
-
-	cov->data->_optim_optimizer_status = (unsigned int) status;
-	cov->data->_optim_uplo = uplo;
-	cov->data->_optim_uplo_of_epsboxes = uplo_of_epsboxes;
-	cov->data->_optim_loup = loup;
-
-	cov->data->_optim_time += time;
-	cov->data->_optim_nb_cells += nb_cells;
-	cov->data->_optim_loup_point = loup_point;
-
-	// for conversion between original/extended boxes
-	IntervalVector tmp(extended_COV ? n+1 : n);
-
-	// by convention, the first box has to be the loup-point.
-	if (extended_COV) {
-		write_ext_box(loup_point, tmp);
-		tmp[goal_var] = Interval(uplo,loup);
-		cov->add(tmp);
-	}
-
-	else {
-		cov->add(loup_point);
-	}
-
-	while (!buffer.empty()) {
-		Cell* cell=buffer.top();
-		if (extended_COV) {
-			cov->add(cell->box);
-		} else {
-			read_ext_box(cell->box,tmp);
-			cov->add(tmp);
-		}
-		delete buffer.pop();
-	}
-
-	return status;
+    return status;
 }
-
 namespace {
 const char* green() {
 #ifndef _WIN32
