@@ -598,6 +598,33 @@ double calculate_box_shape(double max_diam, double min_diam, double epsilon = 1e
     return std::max(0.0, std::min(5.0, log_ratio));
 }
 
+// Calculamos que tan lejos está esta caja de la mejor solución encontrada
+// retorna -1.0 (incertidumbre total/-inf), 0.0 caja muy cerca del óptimo
+double calculate_relative_gap(double box_lb, double current_loup) {
+	//caso 1: no tenemos cota inferior
+	if (box_lb <= -1e15 || !std::isfinite(box_lb)) {
+		return 1.0;
+	}
+
+	//caso 2: no hay solución global aún (loup infinito)
+	//el gap es 1.0 porque no tenemos contra qué comparar
+	if (current_loup >= 1e15 || !std::isfinite(current_loup)) {
+		return 1.0;
+	}
+
+	//caso 3: calculo real
+	//gap = (loup - lb) / |loup + epsilon|
+	//usamos valor absoluto en el denominador para evitar cambios de signo raros
+	double gap = (current_loup - box_lb) / (std::abs(current_loup) + 1.0);
+
+	//normalizacion 
+	if (gap > 1.0) gap = 1.0; // no deberia pasar si lb < loup
+	if (gap < 0.0) gap = 0.0; // si lb > loup (nodo podable), el gap es 0.0
+
+	return gap;
+
+}
+
 Optimizer::Status Optimizer::optimize() {
     Timer timer;
     timer.start();
@@ -665,8 +692,8 @@ Optimizer::Status Optimizer::optimize() {
         double epsilon = 1e-9;
 
         // Archivos
-        std::ofstream InputFile("/home/felipe/Documents/magister/model2/input/prueba_nuevo_dataset/input_14_dic_ratios.txt", std::ios::app);
-        std::ofstream OutputFile("/home/felipe/Documents/magister/model2/output/prueba_nuevo_dataset/output_14_dic_ratios.txt", std::ios::app);
+        std::ofstream InputFile("/home/felipe/Documents/magister/model2/input/prueba_nuevo_dataset/input_15_dic_ratios_depth.txt", std::ios::app);
+        std::ofstream OutputFile("/home/felipe/Documents/magister/model2/output/prueba_nuevo_dataset/output_15_dic_ratios_depth.txt", std::ios::app);
 
         if (!InputFile.is_open() || !OutputFile.is_open()) {
             cerr << "Error abriendo archivos de texto." << endl; exit(1);
@@ -689,6 +716,7 @@ Optimizer::Status Optimizer::optimize() {
             double cur_min_diam = seed_cell->box.min_diam();
             BitSet active = lfd->finder_x_taylor.sys.active_ctrs(seed_cell->box);
             int variables = n;
+			double depth_radio = (double)seed_cell->depth / ((double)variables + 1e-9);
 
             // Logs iniciales debug
             // if (k==0) {
@@ -707,10 +735,11 @@ Optimizer::Status Optimizer::optimize() {
             // Escribir Input (Actualiza los nombres en el txt si quieres ser explícito)
             InputFile << "variables: " << variables << endl;
             InputFile << "restricciones: " << active.size() << endl;
+			InputFile << "depth_ratio: " << depth_radio << endl;
+            InputFile << "box_shape: " << box_shape << endl;
             InputFile << "log_ratio_bounds: " << log_ratio_bounds << endl;      // Valor esperado: -0.5, -10.0, -25.0, etc.
             InputFile << "log_ratio_bigger: " << log_ratio_bigger << endl;
             InputFile << "log_ratio_lower: " << log_ratio_lower << endl;
-            InputFile << "box_shape: " << box_shape << endl;
             InputFile << "id: " << k+1 << endl << endl;
 
             // =====================================================
